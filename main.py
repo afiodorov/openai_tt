@@ -1,3 +1,4 @@
+import argparse
 import base64
 import json
 import os
@@ -21,17 +22,22 @@ async def send_audio(ws, audio_stream: AudioStreamer, audio_done: asyncio.Event)
 
 
 async def receive_transcripts(ws, audio_done: asyncio.Event):
+    interim_text = ""
     while not audio_done.is_set():
         try:
             message = json.loads(await asyncio.wait_for(ws.recv(), timeout=0.5))
-            print(message)
-            # if (
-            #     message.get("type")
-            #     == "conversation.item.input_audio_transcription.delta"
-            # ):
-            #     print(message["delta"])
+            if message.get("type") == "response.text.delta":
+                # Append the new word (or token) with a space
+                interim_text += message["delta"] + " "
+                # Print the interim text using carriage return to overwrite the current line
+                print("\r" + interim_text, end="", flush=True)
+            elif message.get("type") == "response.text.done":
+                # Clear the current line using an ANSI escape sequence (\033[K clears to end-of-line)
+                print("\r\033[K", end="", flush=True)
+                # Print the final transcript on a new line
+                print(message["text"])
         except asyncio.TimeoutError:
-            # No message received within the timeout, loop and check the event.
+            # No message received within the timeout; continue checking.
             continue
 
 
@@ -49,10 +55,21 @@ async def transcribe_live_audio(
 
 
 async def main():
+    parser = argparse.ArgumentParser(
+        description="Live audio transcription and translation"
+    )
+    parser.add_argument(
+        "-s", "--source_lang", type=str, required=True, help="Source language"
+    )
+    parser.add_argument(
+        "-t", "--target_lang", type=str, required=True, help="Target language"
+    )
+    args = parser.parse_args()
+
     load_dotenv()
 
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    uri = "wss://api.openai.com/v1/realtime?intent=transcription"
+    uri = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
 
     additional_headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -60,22 +77,22 @@ async def main():
         "OpenAI-Log-Session": "1",
     }
     config: dict[str, Any] = {
-        "type": "transcription_session.update",
+        "type": "session.update",
         "session": {
+            "modalities": ["text"],
+            "instructions": f"Translate into {args.target_lang} from {args.source_lang}",
             "input_audio_format": "pcm16",
-            "input_audio_transcription": {
-                "model": "gpt-4o-transcribe",
-                "prompt": "translate into english",
-                "language": "ru",
-            },
+            "input_audio_transcription": {"model": "gpt-4o-transcribe"},
             "turn_detection": {
                 "type": "server_vad",
                 "threshold": 0.5,
                 "prefix_padding_ms": 300,
                 "silence_duration_ms": 500,
+                "create_response": True,
             },
-            "input_audio_noise_reduction": {"type": "near_field"},
-            # "include": ["item.input_audio_transcription.logprobs"],
+            "tool_choice": "auto",
+            "temperature": 0.8,
+            "max_response_output_tokens": "inf",
         },
     }
 
