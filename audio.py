@@ -1,93 +1,86 @@
 import asyncio
-import pyaudio
-from threading import Thread
+import sounddevice as sd
+import numpy as np
 import signal
+import queue
+from threading import Thread
 from typing import Optional
 
-FORMAT = pyaudio.paInt16
 CHANNELS = 1
-RATE = 24_000
-CHUNK = 1024 * 10
+SAMPLE_RATE = 24_000
+CHUNK = 1024  # block size in frames
 
 
 class AudioStreamer:
     def __init__(self):
-        self.p = pyaudio.PyAudio()
-        self.stream: Optional[pyaudio.Stream] = None
-        self.is_streaming = False
+        self.async_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+        self._blocking_queue = queue.Queue()
+        self.stream: Optional[sd.InputStream] = None
         self.worker_thread: Optional[Thread] = None
-        self.queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self._old_sigint_handler = None
-        self._closed = False  # internal flag to run close() only once
+        self._closed = False
+
+    def _audio_callback(self, indata, frames, time, status):
+        if status:
+            print("Stream status:", status)
+        # Convert the NumPy array (indata) to bytes
+        self._blocking_queue.put(indata.tobytes())
 
     def start_stream(self):
-        self.stream = self.p.open(
-            format=FORMAT,
+        self.stream = sd.InputStream(
             channels=CHANNELS,
-            rate=RATE,
-            input=True,
-            frames_per_buffer=CHUNK,
+            samplerate=SAMPLE_RATE,
+            dtype="int16",
+            blocksize=CHUNK,
+            callback=self._audio_callback,
         )
-        self.is_streaming = True
-        print("Microphone stream started")
-        self.worker_thread = Thread(target=self._reader, daemon=True)
+        self.stream.start()
+        print("SoundDevice InputStream started")
+        # Start a background thread to transfer data from blocking queue to asyncio queue.
+        self.worker_thread = Thread(target=self._queue_worker, daemon=True)
         self.worker_thread.start()
 
-    def _reader(self):
-        # Background thread that continuously reads audio and pushes it to the asyncio queue.
-        while self.is_streaming:
-            if self.stream is None:
-                break  # safeguard for type checking
+    def _queue_worker(self):
+        # Continuously transfer audio data from the blocking queue to the asyncio queue.
+        while not self._closed:
             try:
-                data = self.stream.read(CHUNK, exception_on_overflow=False)
+                data = self._blocking_queue.get(timeout=0.1)
                 if self.loop is not None:
-                    # Push data into the asyncio queue.
-                    asyncio.run_coroutine_threadsafe(self.queue.put(data), self.loop)
-            except Exception as e:
-                print("Error reading audio:", e)
-                break
+                    asyncio.run_coroutine_threadsafe(
+                        self.async_queue.put(data), self.loop
+                    )
+            except queue.Empty:
+                continue
 
     def stop_stream(self):
-        self.is_streaming = False
         if self.stream is not None:
-            try:
-                self.stream.stop_stream()
-            except Exception as e:
-                print("Error stopping stream:", e)
+            self.stream.stop()
             self.stream.close()
             self.stream = None
-        print("Microphone stream stopped")
+        self._closed = True
+        print("SoundDevice InputStream stopped")
 
     def close(self):
-        if self._closed:
-            return
-        self._closed = True
         self.stop_stream()
         if self.worker_thread is not None:
             self.worker_thread.join(timeout=1.0)
-        self.p.terminate()
         print("Audio resources released")
-        # Put a sentinel value (None) to ensure the async iterator exits.
         if self.loop is not None:
-            asyncio.run_coroutine_threadsafe(self.queue.put(None), self.loop)
+            asyncio.run_coroutine_threadsafe(self.async_queue.put(None), self.loop)
 
     def _handle_sigint(self, signum, frame):
-        if self._closed:
-            return
         print("KeyboardInterrupt received, shutting down stream...")
         self.close()
 
     async def __aenter__(self):
         self.loop = asyncio.get_running_loop()
-        # Install our custom SIGINT handler.
         self._old_sigint_handler = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, self._handle_sigint)
         self.start_stream()
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        # Restore the previous SIGINT handler.
         if self._old_sigint_handler is not None:
             signal.signal(signal.SIGINT, self._old_sigint_handler)
         self.close()
@@ -96,7 +89,7 @@ class AudioStreamer:
         return self
 
     async def __anext__(self) -> bytes:
-        chunk = await self.queue.get()
+        chunk = await self.async_queue.get()
         if chunk is None:
             raise StopAsyncIteration
         return chunk
