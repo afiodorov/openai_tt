@@ -8,7 +8,7 @@ from typing import Optional
 
 CHANNELS = 1
 SAMPLE_RATE = 24_000
-CHUNK = 1024  # block size in frames
+CHUNK = 24_000 // 5
 
 
 class AudioStreamer:
