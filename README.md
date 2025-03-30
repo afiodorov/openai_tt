@@ -2,6 +2,8 @@
 
 A Python application using OpenAI's Realtime API to transcribe microphone input in real-time.
 
+Experimental, current latency is terrible (4 seconds) and it's very expensive (a few dollars per hour), but it translates really well.
+
 ## Prerequisites
 
 - Python 3.12 or higher
