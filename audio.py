@@ -1,29 +1,31 @@
 import asyncio
-import sounddevice as sd
-import numpy as np
-import signal
+import logging
 import queue
+import signal
 from threading import Thread
-from typing import Optional
+
+import sounddevice as sd
+
+logger = logging.getLogger(__name__)
 
 CHANNELS = 1
 SAMPLE_RATE = 24_000
-CHUNK = 24_000 // 5
+CHUNK = 24_000 // 10
 
 
 class AudioStreamer:
     def __init__(self):
         self.async_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._blocking_queue = queue.Queue()
-        self.stream: Optional[sd.InputStream] = None
-        self.worker_thread: Optional[Thread] = None
-        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.stream: sd.InputStream | None = None
+        self.worker_thread: Thread | None = None
+        self.loop: asyncio.AbstractEventLoop | None = None
         self._old_sigint_handler = None
         self._closed = False
 
     def _audio_callback(self, indata, frames, time, status):
         if status:
-            print("Stream status:", status)
+            logger.info("Stream status: %s", status)
         # Convert the NumPy array (indata) to bytes
         self._blocking_queue.put(indata.tobytes())
 
@@ -36,8 +38,9 @@ class AudioStreamer:
             callback=self._audio_callback,
         )
         self.stream.start()
-        print("SoundDevice InputStream started")
-        # Start a background thread to transfer data from blocking queue to asyncio queue.
+        logger.info("SoundDevice InputStream started")
+        # Start a background thread to transfer data from blocking queue to
+        # asyncio queue.
         self.worker_thread = Thread(target=self._queue_worker, daemon=True)
         self.worker_thread.start()
 
@@ -48,7 +51,8 @@ class AudioStreamer:
                 data = self._blocking_queue.get(timeout=0.1)
                 if self.loop is not None:
                     asyncio.run_coroutine_threadsafe(
-                        self.async_queue.put(data), self.loop
+                        self.async_queue.put(data),
+                        self.loop,
                     )
             except queue.Empty:
                 continue
@@ -59,18 +63,18 @@ class AudioStreamer:
             self.stream.close()
             self.stream = None
         self._closed = True
-        print("SoundDevice InputStream stopped")
+        logger.info("SoundDevice InputStream stopped")
 
     def close(self):
         self.stop_stream()
         if self.worker_thread is not None:
             self.worker_thread.join(timeout=1.0)
-        print("Audio resources released")
+        logger.info("Audio resources released")
         if self.loop is not None:
             asyncio.run_coroutine_threadsafe(self.async_queue.put(None), self.loop)
 
     def _handle_sigint(self, signum, frame):
-        print("KeyboardInterrupt received, shutting down stream...")
+        logger.info("KeyboardInterrupt received, shutting down stream...")
         self.close()
 
     async def __aenter__(self):
